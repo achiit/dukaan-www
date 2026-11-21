@@ -1,0 +1,503 @@
+
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Smart AI Counter HD</title>
+
+<style>
+*{box-sizing:border-box}
+body{
+ margin:0;padding:14px;
+ background:#edf4ed;
+ font-family:Arial,sans-serif;color:#18351f
+}
+.app{
+ max-width:600px;margin:auto;padding:18px;
+ background:white;border-radius:20px;
+ box-shadow:0 5px 25px #0002
+}
+h1{text-align:center;color:#16843b}
+.sub{text-align:center;color:#777}
+button{
+ border:0;border-radius:12px;padding:14px;
+ background:#16843b;color:white;
+ font-weight:bold;font-size:15px;cursor:pointer
+}
+button:disabled{opacity:.45}
+.grid{
+ display:grid;grid-template-columns:1fr 1fr;
+ gap:10px;margin:15px 0
+}
+.dark{background:#344c3a}
+#cameraBox{
+ display:none;background:#111;
+ border-radius:14px;overflow:hidden;
+ margin-top:15px
+}
+video{width:100%;display:block}
+#photo{
+ display:none;width:100%;max-height:420px;
+ object-fit:contain;border-radius:12px;
+ background:#eee
+}
+#overlay{
+ display:block;width:100%;height:auto;
+ border-radius:12px;touch-action:manipulation
+}
+.previewBox{position:relative;margin-top:15px}
+.result{
+ background:#e6f7e8;padding:18px;
+ border-radius:15px;text-align:center;margin-top:18px
+}
+.big{font-size:52px;font-weight:bold;color:#16843b}
+.score{
+ background:#f2f5f2;padding:14px;
+ border-radius:12px;margin-top:12px
+}
+.item{
+ padding:12px 5px;border-bottom:1px solid #ddd;
+ display:flex;justify-content:space-between;gap:8px
+}
+.item span:last-child{text-align:right;color:#16843b;font-weight:bold}
+#status{
+ text-align:center;padding:12px;
+ color:#805b16;font-size:14px
+}
+.note{font-size:12px;color:#777;line-height:1.6}
+</style>
+</head>
+
+<body>
+<div class="app">
+
+<h1>📷 SMART AI COUNTER</h1>
+<p class="sub">HD Product & Object Counting System</p>
+
+<div class="grid">
+<button id="openCamera">📷 OPEN CAMERA</button>
+<button class="dark" id="galleryBtn">🖼️ GALLERY</button>
+</div>
+
+<input type="file" id="gallery"
+accept="image/*" hidden>
+
+<div id="cameraBox">
+<video id="video" autoplay playsinline></video>
+<div class="grid" style="padding:10px">
+<button id="capture">📸 TAKE PHOTO</button>
+<button class="dark" id="closeCamera">CLOSE CAMERA</button>
+</div>
+</div>
+
+<div class="previewBox">
+<img id="photo" alt="Selected product">
+<canvas id="overlay"></canvas>
+</div>
+
+<div class="grid">
+<button id="scan" disabled>🔍 AI SCAN</button>
+<button class="dark" id="manual" disabled>✋ MANUAL COUNT</button>
+</div>
+
+<div class="grid">
+<button class="dark" id="reset">RESET COUNT</button>
+<button class="dark" id="clear">CLEAR PHOTO</button>
+</div>
+
+<div id="status">कैमरा खोलें या गैलरी से फोटो चुनें।</div>
+
+<div class="result">
+<h3>TOTAL PIECES</h3>
+<div class="big" id="total">0</div>
+<p>कुल पहचाने गए पीस</p>
+</div>
+
+<div class="score">
+<h3>📊 AI SCAN SCORE</h3>
+<p>कुल पहचानी गई वस्तुएँ:
+<strong id="objects">0</strong></p>
+<p>औसत Confidence Score:
+<strong id="average">0%</strong></p>
+<p>सबसे कम Score:
+<strong id="lowest">0%</strong></p>
+</div>
+
+<h3>📦 PRODUCT QUANTITY REPORT</h3>
+<div id="report">
+अभी कोई रिपोर्ट नहीं है।
+</div>
+
+<h3>🔎 DETECTION DETAILS</h3>
+<div id="details">
+अभी कोई वस्तु नहीं मिली।
+</div>
+
+<p class="note">
+AI Score का मतलब मॉडल का पहचान पर भरोसा है, गिनती की गारंटी नहीं।
+एक-दूसरे से चिपकी वस्तुएँ, छिपे हुए फल और छोटे बीज गलत गिने जा सकते हैं।
+वास्तविक वजन या ग्राम फोटो से निर्धारित नहीं किया जा सकता।
+AI मॉडल को इंटरनेट और HTTPS या localhost की जरूरत होती है।
+</p>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+
+<script>
+const $=id=>document.getElementById(id);
+
+const video=$("video");
+const photo=$("photo");
+const canvas=$("overlay");
+const ctx=canvas.getContext("2d");
+
+let stream=null;
+let model=null;
+let ready=false;
+let manualMode=false;
+let detections=[];
+let manualPoints=[];
+let photoURL=null;
+
+function setStatus(text){
+ $("status").textContent=text;
+}
+
+function updateReport(){
+ const groups={};
+
+ detections.forEach(d=>{
+  if(!groups[d.class]){
+   groups[d.class]={
+    count:0,
+    scores:[]
+   };
+  }
+
+  groups[d.class].count++;
+  groups[d.class].scores.push(d.score);
+ });
+
+ let html="";
+ const scores=detections.map(d=>d.score);
+
+ Object.entries(groups).forEach(([name,g])=>{
+  const avg=g.scores.reduce((a,b)=>a+b,0)/g.scores.length;
+
+  html+=`
+   <div class="item">
+    <span>${name}</span>
+    <span>${g.count} पीस | ${Math.round(avg*100)}%</span>
+   </div>`;
+ });
+
+ if(manualPoints.length){
+  html+=`
+   <div class="item">
+    <span>Manual Objects</span>
+    <span>${manualPoints.length} पीस</span>
+   </div>`;
+ }
+
+ $("report").innerHTML=html||"अभी कोई रिपोर्ट नहीं है।";
+
+ $("objects").textContent=detections.length;
+
+ const average=scores.length?
+  scores.reduce((a,b)=>a+b,0)/scores.length:0;
+
+ $("average").textContent=Math.round(average*100)+"%";
+
+ $("lowest").textContent=
+  (scores.length?Math.round(Math.min(...scores)*100):0)+"%";
+
+ $("total").textContent=detections.length+manualPoints.length;
+
+ if(!scores.length){
+  $("details").textContent="AI की कोई पहचान नहीं हुई।";
+ }else{
+  $("details").innerHTML=detections.map((d,i)=>`
+   <div class="item">
+    <span>${i+1}. ${d.class}</span>
+    <span>${(d.score*100).toFixed(1)}% Score</span>
+   </div>
+  `).join("");
+ }
+}
+
+function draw(){
+ if(!ready)return;
+
+ const w=photo.naturalWidth;
+ const h=photo.naturalHeight;
+
+ canvas.width=w;
+ canvas.height=h;
+
+ ctx.clearRect(0,0,w,h);
+
+ detections.forEach((d,i)=>{
+  const [x,y,bw,bh]=d.bbox;
+
+  ctx.strokeStyle="#00d65a";
+  ctx.lineWidth=Math.max(3,w/250);
+  ctx.strokeRect(x,y,bw,bh);
+
+  ctx.fillStyle="#008b35";
+  ctx.font="bold "+Math.max(18,w/45)+"px Arial";
+
+  ctx.fillText(
+   d.class+" "+Math.round(d.score*100)+"%",
+   x,Math.max(20,y-5)
+  );
+ });
+
+ manualPoints.forEach((p,i)=>{
+  ctx.beginPath();
+  ctx.arc(p.x,p.y,Math.max(12,w/65),0,Math.PI*2);
+  ctx.fillStyle="red";
+  ctx.fill();
+
+  ctx.fillStyle="white";
+  ctx.font="bold 18px Arial";
+  ctx.fillText(i+1,p.x-5,p.y+6);
+ });
+
+ updateReport();
+}
+
+function loadPhoto(file){
+ if(!file)return;
+
+ if(!file.type.startsWith("image/")){
+  setStatus("सही फोटो फाइल चुनें।");
+  return;
+ }
+
+ if(photoURL)URL.revokeObjectURL(photoURL);
+
+ photoURL=URL.createObjectURL(file);
+
+ ready=false;
+ detections=[];
+ manualPoints=[];
+ $("total").textContent="0";
+
+ photo.onload=()=>{
+  ready=true;
+  photo.style.display="block";
+
+  $("scan").disabled=false;
+  $("manual").disabled=false;
+
+  manualMode=false;
+  draw();
+
+  setStatus("फोटो सफलतापूर्वक अपलोड हुई। AI SCAN दबाएँ।");
+ };
+
+ photo.onerror=()=>{
+  setStatus("फोटो नहीं खुली। दूसरी फोटो चुनें।");
+ };
+
+ photo.src=photoURL;
+}
+
+// Gallery
+$("galleryBtn").onclick=()=>$("gallery").click();
+
+$("gallery").onchange=e=>{
+ loadPhoto(e.target.files[0]);
+ e.target.value="";
+};
+
+// Camera
+$("openCamera").onclick=async()=>{
+ try{
+  if(!navigator.mediaDevices ||
+     !navigator.mediaDevices.getUserMedia){
+   $("gallery").click();
+   setStatus("इस जगह लाइव कैमरा उपलब्ध नहीं है। Gallery से फोटो चुनें या HTTPS पर खोलें।");
+   return;
+  }
+
+  stream=await navigator.mediaDevices.getUserMedia({
+   video:{facingMode:{ideal:"environment"}},
+   audio:false
+  });
+
+  video.srcObject=stream;
+  await video.play();
+
+  $("cameraBox").style.display="block";
+  setStatus("कैमरा चालू है। फोटो खींचें।");
+
+ }catch(error){
+  setStatus("कैमरा अनुमति नहीं मिली। Gallery से फोटो चुनें।");
+  $("gallery").click();
+ }
+};
+
+$("capture").onclick=()=>{
+ if(!stream)return;
+
+ const c=document.createElement("canvas");
+
+ c.width=video.videoWidth;
+ c.height=video.videoHeight;
+
+ c.getContext("2d").drawImage(video,0,0,c.width,c.height);
+
+ c.toBlob(blob=>{
+  if(blob){
+   loadPhoto(new File([blob],"camera-photo.jpg",{
+    type:"image/jpeg"
+   }));
+
+   stopCamera();
+  }
+ },"image/jpeg",.95);
+};
+
+function stopCamera(){
+ if(stream){
+  stream.getTracks().forEach(track=>track.stop());
+  stream=null;
+ }
+
+ video.srcObject=null;
+ $("cameraBox").style.display="none";
+}
+
+$("closeCamera").onclick=stopCamera;
+
+// AI Model
+async function loadAI(){
+ if(model)return model;
+
+ if(!window.tf || !window.cocoSsd){
+  throw new Error("AI library unavailable");
+ }
+
+ await tf.ready();
+
+ model=await cocoSsd.load({
+  base:"mobilenet_v2"
+ });
+
+ return model;
+}
+
+// AI Scan
+$("scan").onclick=async()=>{
+ if(!ready)return;
+
+ $("scan").disabled=true;
+ manualMode=false;
+
+ setStatus("AI मॉडल तैयार हो रहा है...");
+
+ try{
+  const ai=await loadAI();
+
+  setStatus("फोटो स्कैन हो रही है...");
+
+  const predictions=await ai.detect(photo,40,.25);
+
+  detections=predictions.filter(p=>p.score>=.25);
+
+  manualPoints=[];
+
+  draw();
+
+  setStatus(
+   "स्कैन पूरा! "+detections.length+
+   " वस्तुएँ पहचानी गईं।"
+  );
+
+  if(!detections.length){
+   setStatus("AI ने कोई समर्थित वस्तु नहीं पहचानी। MANUAL COUNT इस्तेमाल करें।");
+  }
+
+ }catch(error){
+  console.error(error);
+  setStatus("AI लोड नहीं हुआ। इंटरनेट चालू करें और दोबारा कोशिश करें।");
+
+ }finally{
+  $("scan").disabled=false;
+ }
+};
+
+// Manual counting
+$("manual").onclick=()=>{
+ if(!ready)return;
+
+ manualMode=true;
+
+ setStatus("फोटो में हर वस्तु के बीच में एक बार टैप करें।");
+};
+
+canvas.addEventListener("click",e=>{
+ if(!manualMode || !ready)return;
+
+ const rect=canvas.getBoundingClientRect();
+
+ const x=(e.clientX-rect.left)*canvas.width/rect.width;
+ const y=(e.clientY-rect.top)*canvas.height/rect.height;
+
+ manualPoints.push({x,y});
+
+ draw();
+
+ setStatus("मैन्युअल पीस: "+manualPoints.length);
+});
+
+// Reset
+$("reset").onclick=()=>{
+ detections=[];
+ manualPoints=[];
+ manualMode=false;
+
+ if(ready)draw();
+ else updateReport();
+
+ setStatus("काउंटिंग रीसेट हो गई।");
+};
+
+// Clear
+$("clear").onclick=()=>{
+ stopCamera();
+
+ ready=false;
+ detections=[];
+ manualPoints=[];
+ manualMode=false;
+
+ if(photoURL){
+  URL.revokeObjectURL(photoURL);
+  photoURL=null;
+ }
+
+ photo.removeAttribute("src");
+ photo.style.display="none";
+
+ ctx.clearRect(0,0,canvas.width,canvas.height);
+
+ $("scan").disabled=true;
+ $("manual").disabled=true;
+
+ $("total").textContent="0";
+ updateReport();
+
+ setStatus("नई फोटो अपलोड करें।");
+};
+
+window.addEventListener("beforeunload",stopCamera);
+updateReport();
+</script>
+
+</body>
+</html>
